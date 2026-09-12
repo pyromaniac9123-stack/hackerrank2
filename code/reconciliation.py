@@ -26,15 +26,19 @@ class _Evidence:
     explicit_action: bool = False
     settled_fact: bool = False
     estimate: bool = False
+    event_date: Optional[date] = None
 
 
 _STATUS_PATTERNS = (
     ("cancelled", re.compile(r"\b(cancelled|canceled)\b", re.IGNORECASE)),
     ("settled", re.compile(r"\b(settled|completed|paid)\b", re.IGNORECASE)),
-    ("amended", re.compile(r"\b(amended|revised|updated|replaced)\b", re.IGNORECASE)),
+    ("amended", re.compile(
+        r"\b(amended|revised|updated|replaced|moved|delayed|postponed|rescheduled)\b",
+        re.IGNORECASE,
+    )),
 )
 _AMOUNT_PATTERN = re.compile(
-    r"(?:amount|total|payable|salary|payment|value)[^\d-]*"
+    r"(?:amount|total|payable|salary|payment|value|amended\s+to|revised\s+to)[^\d-]*"
     r"([0-9][0-9,]*(?:\.[0-9]+)?)",
     re.IGNORECASE,
 )
@@ -59,6 +63,17 @@ def _message_evidence(message: Message) -> Optional[_Evidence]:
     )
     currency_match = _CURRENCY_PATTERN.search(message.message_text)
     estimate = bool(re.search(r"\b(estimate|estimated|forecast|expected)\b", message.message_text, re.IGNORECASE))
+    date_match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", message.message_text)
+    amended_date = None
+    if date_match and re.search(
+        r"\b(moved|delayed|postponed|rescheduled|amended|revised|updated|scheduled)\b",
+        message.message_text,
+        re.IGNORECASE,
+    ):
+        try:
+            amended_date = date.fromisoformat(date_match.group(1))
+        except ValueError:
+            amended_date = None
     return _Evidence(
         source_id=f"message:{message.message_id}",
         source_kind="message",
@@ -71,6 +86,7 @@ def _message_evidence(message: Message) -> Optional[_Evidence]:
         explicit_action=explicit_action,
         settled_fact=status == "settled",
         estimate=estimate,
+        event_date=amended_date,
     )
 
 
@@ -192,7 +208,8 @@ def reconcile_events(
                 chosen.explicit_action
                 or (status not in {"settled", "cancelled"} and chosen.settled_fact)
             ):
-                status, status_source = chosen.status or status, chosen.source_id
+                if chosen.status in {"cancelled", "settled"}:
+                    status, status_source = chosen.status, chosen.source_id
                 notes.append("status selected by evidence precedence")
 
         description = event.description
@@ -200,7 +217,15 @@ def reconcile_events(
         if not description:
             recovered, description_source, _ = _choose_evidence(event, candidates, "description")
             description = recovered or ""
-
+        event_date = event.event_date
+        settlement_date = event.settlement_date
+        date_candidates = [candidate for candidate in candidates if candidate.event_date]
+        explicit_dates = [candidate for candidate in date_candidates if candidate.explicit_action]
+        if explicit_dates:
+            chosen_date = max(explicit_dates, key=lambda candidate: candidate.observed_at)
+            event_date = chosen_date.event_date
+            settlement_date = chosen_date.event_date
+            notes.append("date amended by explicit evidence")
         if amount_source == "ambiguous-safe-choice":
             notes.append("ambiguous amount resolved conservatively")
         normalized[event_id] = NormalizedFinancialEvent(
@@ -208,8 +233,8 @@ def reconcile_events(
             original_event=event,
             canonical_amount=amount,
             canonical_currency=currency,
-            canonical_event_date=event.event_date,
-            canonical_settlement_date=event.settlement_date,
+            canonical_event_date=event_date,
+            canonical_settlement_date=settlement_date,
             canonical_status=status,
             canonical_description=description,
             amount_source=amount_source,

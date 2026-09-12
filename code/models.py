@@ -139,6 +139,8 @@ class NormalizedEvent:
     recurrence_explicit: bool
     reconciled_event: NormalizedFinancialEvent
     sort_key: tuple[date, date, str]
+    recurrence_source_event_id: Optional[str] = None
+    occurrence_date: Optional[date] = None
 
 
 @dataclass

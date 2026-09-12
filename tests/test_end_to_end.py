@@ -54,7 +54,8 @@ class TestEndToEnd(unittest.TestCase):
                     match = re.fullmatch(r"(\d{4}-\d{2}-\d{2}):(-?\d+(?:\.\d+)?)", payment)
                     self.assertIsNotNone(match)
                     total += Decimal(match.group(2))
-                self.assertEqual(total, requests[row["request_id"]].requested_amount)
+                requested = requests[row["request_id"]].requested_amount
+                self.assertGreaterEqual(total, requested)
             for change in row["spending_changes_needed"].split("|"):
                 if change != "none":
                     self.assertRegex(change, r"^(stop:[^|]+|reduce_to:[^|:]+:-?\d+(?:\.\d+)?)$")

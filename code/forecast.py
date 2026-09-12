@@ -7,7 +7,7 @@ from typing import Iterable, Mapping
 from code.models import DailyBalance, FinancialProfile, ForecastResult, NormalizedEvent
 
 
-_APPLICABLE_STATUS_CATEGORIES = {"confirmed_settled", "future_confirmed"}
+_APPLICABLE_STATUS_CATEGORIES = {"confirmed_settled", "future_confirmed", "pending"}
 _NON_APPLICABLE_STATUS_CATEGORIES = {
     "pending",
     "failed",
@@ -17,7 +17,10 @@ _NON_APPLICABLE_STATUS_CATEGORIES = {
 
 
 def _event_date(event: NormalizedEvent) -> date | None:
-    if event.status_category in _APPLICABLE_STATUS_CATEGORIES:
+    # Pending debits reserve cash; pending credits are deliberately ignored.
+    if event.status_category in _APPLICABLE_STATUS_CATEGORIES and not (
+        event.status_category == "pending" and event.direction == "credit"
+    ):
         return event.settlement_date or event.event_date
     return None
 
@@ -47,8 +50,11 @@ def _recurring_occurrences(
         anchor = _event_date(template)
         if anchor is None:
             continue
-        recurring_ids.update(item.event_id for item in group)
         current = anchor
+        represented = {
+            (_event_date(item), item.direction, item.amount)
+            for item in group
+        }
         while current <= end_date:
             if current >= start_date:
                 settlement = current
@@ -56,13 +62,18 @@ def _recurring_occurrences(
                     settlement = current + (
                         template.settlement_date - template.event_date
                     )
-                occurrences.append(
-                    replace(
-                        template,
-                        event_date=current,
-                        settlement_date=settlement,
+                identity = (current, template.direction, template.amount)
+                if identity not in represented:
+                    occurrences.append(
+                        replace(
+                            template,
+                            event_id=f"{template.event_id}@{current.isoformat()}",
+                            event_date=current,
+                            settlement_date=settlement,
+                            recurrence_source_event_id=template.event_id,
+                            occurrence_date=current,
+                        )
                     )
-                )
             current = _next_month(current)
 
     return occurrences, recurring_ids
@@ -88,9 +99,7 @@ def simulate_90_day_forecast(
     recurring_occurrences, recurring_ids = _recurring_occurrences(
         event_values, start_date, end_date
     )
-    forecast_events = [
-        event for event in event_values if event.event_id not in recurring_ids
-    ] + recurring_occurrences
+    forecast_events = event_values + recurring_occurrences
 
     for event in forecast_events:
         movement_date = _event_date(event)

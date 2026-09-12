@@ -49,10 +49,12 @@ def _make_plan(
     changes: list[str],
     requested_amount: Decimal,
     forecast: ForecastResult,
+    expected_total: Optional[Decimal] = None,
 ) -> PaymentPlan:
     total = sum((item.amount for item in installments), Decimal("0"))
     feasible, reason = _payments_are_feasible(forecast, installments)
-    if total != requested_amount:
+    payable = requested_amount if expected_total is None else expected_total
+    if total != payable:
         feasible = False
         reason = "installments do not exactly equal requested amount"
     return PaymentPlan(
@@ -95,6 +97,7 @@ def _eligible_changes(
 def _with_change_effect(
     forecast: ForecastResult,
     event_id: str,
+    original_amount: Decimal,
     replacement: Decimal,
 ) -> ForecastResult:
     daily_balances = []
@@ -102,12 +105,19 @@ def _with_change_effect(
         daily.date: set(daily.applied_event_ids) for daily in forecast.daily_balances
     }
     for daily in forecast.daily_balances:
-        if event_id not in event_by_day[daily.date]:
+        matching_ids = [
+            applied_id for applied_id in event_by_day[daily.date]
+            if applied_id == event_id or applied_id.startswith(f"{event_id}@")
+        ]
+        if not matching_ids:
             daily_balances.append(daily)
             continue
-        delta = replacement
-        outflows = daily.outflows - (daily.outflows - replacement)
-        closing = daily.closing_balance + (daily.outflows - replacement)
+        reduction = sum(
+            (original_amount - replacement for _ in matching_ids),
+            Decimal("0"),
+        )
+        outflows = daily.outflows - reduction
+        closing = daily.closing_balance + reduction
         daily_balances.append(
             type(daily)(
                 date=daily.date,
@@ -118,6 +128,20 @@ def _with_change_effect(
                 applied_event_ids=list(daily.applied_event_ids),
             )
         )
+    # Recompute subsequent openings/closings because reducing one recurring
+    # occurrence changes the balance carried into every later day.
+    carried = None
+    rebuilt = []
+    for daily in daily_balances:
+        opening = daily.opening_balance if carried is None else carried
+        closing = opening + daily.inflows - daily.outflows
+        rebuilt.append(type(daily)(
+            date=daily.date, opening_balance=opening, inflows=daily.inflows,
+            outflows=daily.outflows, closing_balance=closing,
+            applied_event_ids=list(daily.applied_event_ids),
+        ))
+        carried = closing
+    daily_balances = rebuilt
     minimum_day = min(daily_balances, key=lambda item: (item.closing_balance, item.date))
     return type(forecast)(
         request_date=forecast.request_date,
@@ -191,21 +215,35 @@ def generate_payment_plans(
             break
 
     safe = safety.amount_safe_to_pay
+    partial_date = None
+    if Decimal("0") < safe < requested:
+        remainder = requested - safe
+        for daily in forecast.daily_balances:
+            if daily.date <= start:
+                continue
+            candidate = [
+                PaymentInstallment(start, safe),
+                PaymentInstallment(daily.date, remainder),
+            ]
+            feasible, _ = _payments_are_feasible(forecast, candidate)
+            if feasible:
+                partial_date = daily.date
+                break
     if (
         request.allows_partial_payment
         and _profile_accepts(profile, "partial_payment")
         and Decimal("0") < safe < requested
-        and earliest_full is not None
+        and partial_date is not None
         and (
             request.desired_completion_date is None
-            or earliest_full <= request.desired_completion_date
+            or partial_date <= request.desired_completion_date
         )
     ):
         candidates.append(
             _make_plan(
                 [
                     PaymentInstallment(start, safe),
-                    PaymentInstallment(earliest_full, requested - safe),
+                    PaymentInstallment(partial_date, requested - safe),
                 ],
                 "partial_payment",
                 None,
@@ -228,6 +266,23 @@ def generate_payment_plans(
             or option.first_payment_date is None
         ):
             continue
+        if (
+            profile.max_installment_months is not None
+            and option.number_of_payments > 1
+            and option.payment_frequency_days is not None
+            and option.payment_frequency_days * (option.number_of_payments - 1)
+            > profile.max_installment_months * 31
+        ):
+            continue
+        payable = option.total_payable_amount
+        if payable is None:
+            payable = option.payment_amount * option.number_of_payments
+        # A fee is part of the cash obligation.  Reject malformed offers
+        # rather than silently changing their supplied schedule.
+        if option.financing_fee is not None:
+            expected = request.requested_amount + option.financing_fee
+            if payable != expected:
+                continue
         installments = [
             PaymentInstallment(
                 option.first_payment_date
@@ -250,6 +305,7 @@ def generate_payment_plans(
                 [],
                 requested,
                 forecast,
+                payable,
             )
         )
 
@@ -282,7 +338,7 @@ def generate_payment_plans(
             changed_forecast = forecast
             for event_id, replacement, _ in selected:
                 changed_forecast = _with_change_effect(
-                    changed_forecast, event_id, replacement
+                    changed_forecast, event_id, amount, replacement
                 )
             plan = _make_plan(
                 [PaymentInstallment(start, requested)],
@@ -295,5 +351,13 @@ def generate_payment_plans(
             candidates.append(plan)
 
     candidates.sort(key=lambda plan: _rank(plan, request))
-    feasible = [plan for plan in candidates if plan.feasible]
+    feasible = [
+        plan for plan in candidates
+        if plan.feasible
+        and (
+            request.desired_completion_date is None
+            or plan.completion_date <= request.desired_completion_date
+        )
+        and plan.completion_date <= forecast.end_date
+    ]
     return PlannerResult(candidates, feasible, earliest_full)

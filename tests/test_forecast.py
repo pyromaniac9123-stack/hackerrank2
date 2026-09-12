@@ -108,7 +108,7 @@ class TestForecast(unittest.TestCase):
             for status in ("pending", "failed", "cancelled", "estimate")
         ]
         result = simulate_90_day_forecast(profile(), events, self.request_date)
-        self.assertEqual(result.daily_balances[0].closing_balance, Decimal("100.00"))
+        self.assertEqual(result.daily_balances[0].closing_balance, Decimal("90.00"))
 
     def test_confirmed_and_settled_events_affect_balance(self):
         result = simulate_90_day_forecast(

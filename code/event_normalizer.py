@@ -105,7 +105,12 @@ def normalize_events(
                 ),
         )
         normalized.append(item)
-        grouped[_recurrence_key(original)].append(item)
+        if (
+            item.status_category in {"confirmed_settled", "future_confirmed"}
+            and item.amount is not None
+            and direction in {"credit", "debit"}
+        ):
+            grouped[_recurrence_key(original)].append(item)
 
     for group in grouped.values():
         recurring = _monthly_pattern(group) or (

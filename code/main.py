@@ -1,4 +1,5 @@
 import csv
+from dataclasses import replace
 from pathlib import Path
 from typing import Iterable
 
@@ -16,7 +17,8 @@ from code.event_normalizer import normalize_events
 from code.forecast import simulate_90_day_forecast
 from code.image_extractor import extract_all_images
 from code.message_cashflows import message_cash_flows
-from code.models import FinalDecision, Request
+from code.models import FinalDecision, Request, NormalizedEvent
+from code.utils import convert_amount
 from code.planner import generate_payment_plans
 from code.reconciliation import reconcile_events
 from code.safety import evaluate_safety
@@ -55,7 +57,7 @@ def generate_decisions(dataset_root: Path) -> list[tuple[Request, FinalDecision]
     requests = load_requests(dataset_root / "requests.csv")
     profiles = load_financial_profiles(dataset_root / "financial_profiles.csv")
     events = load_financial_events(dataset_root / "financial_events.csv")
-    load_exchange_rates(dataset_root / "exchange_rates.csv")
+    exchange_rates = load_exchange_rates(dataset_root / "exchange_rates.csv")
     payment_options = load_payment_options(dataset_root / "request_payment_options.csv")
     messages = load_messages(dataset_root / "messages.csv")
     images = load_images(dataset_root / "images.csv", dataset_root / "media" / "images")
@@ -66,6 +68,21 @@ def generate_decisions(dataset_root: Path) -> list[tuple[Request, FinalDecision]
     normalized = normalize_events(
         list(reconciled.values()) + message_events
     )
+    # All forecast arithmetic is performed in the account's home currency.
+    converted: dict[str, NormalizedEvent] = {}
+    for event in normalized.values():
+        profile = profiles.get(event.user_id)
+        amount = event.amount
+        currency = event.currency
+        if profile and amount is not None and currency.upper() != profile.home_currency.upper():
+            conversion_date = event.settlement_date or event.event_date
+            if conversion_date is not None:
+                amount = convert_amount(
+                    amount, currency, profile.home_currency, conversion_date, exchange_rates
+                )
+                event = replace(event, amount=amount, currency=profile.home_currency)
+        converted[event.event_id] = event
+    normalized = converted
     events_by_user = {
         user_id: [event for event in normalized.values() if event.user_id == user_id]
         for user_id in profiles

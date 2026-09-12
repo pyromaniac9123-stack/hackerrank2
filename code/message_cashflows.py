@@ -32,6 +32,8 @@ _EXPECTED_FLOW_PATTERN = re.compile(
 )
 def _parse_message_cash_flow(message: Message) -> tuple[Decimal, str, date, str] | None:
     text = message.message_text
+    if message.related_event_id:
+        return None
     if (
         _CANCELLED_PATTERN.search(text)
         or not _CASH_FLOW_PATTERN.search(text)
@@ -39,9 +41,23 @@ def _parse_message_cash_flow(message: Message) -> tuple[Decimal, str, date, str]
     ):
         return None
 
-    amount_match = _AMOUNT_CURRENCY_PATTERN.search(text)
-    date_match = _DATE_PATTERN.search(text)
-    if not amount_match or not date_match:
+    clauses = re.split(r"[.!?;]\s+|\n+", text)
+    pairs = []
+    for clause in clauses:
+        amount_match = _AMOUNT_CURRENCY_PATTERN.search(clause)
+        date_match = _DATE_PATTERN.search(clause)
+        if amount_match and date_match:
+            pairs.append((clause, amount_match, date_match))
+    if not pairs:
+        amounts = list(_AMOUNT_CURRENCY_PATTERN.finditer(text))
+        dates = list(_DATE_PATTERN.finditer(text))
+        if len(amounts) == 1 and len(dates) == 1:
+            pairs.append((text, amounts[0], dates[0]))
+    if len(pairs) != 1:
+        return None
+    clause, amount_match, date_match = pairs[0]
+    if re.search(r"\b(hypothetical|if|might|could|possibly|pending|unrealized|"
+                 r"estimate|forecast|history|historical)\b", clause, re.IGNORECASE):
         return None
 
     try:
@@ -53,7 +69,7 @@ def _parse_message_cash_flow(message: Message) -> tuple[Decimal, str, date, str]
         ) from exc
 
     has_income_language = re.search(
-        r"\b(salary|income|receipt|payout|credit)\b", text, re.IGNORECASE
+        r"\b(salary|income|receipt|payout|credit|refund)\b", clause, re.IGNORECASE
     )
     direction = "credit" if has_income_language else "debit"
     return amount, amount_match.group("currency").upper(), event_date, direction
