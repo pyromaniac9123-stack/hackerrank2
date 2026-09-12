@@ -1,8 +1,8 @@
 import csv
 from pathlib import Path
 from typing import Dict, Union, Optional
-from code.models import Request, FinancialProfile, FinancialEvent, ExchangeRate, PaymentOption
-from code.utils import parse_decimal, parse_date
+from code.models import Request, FinancialProfile, FinancialEvent, ExchangeRate, PaymentOption, Message, ImageRecord
+from code.utils import parse_decimal, parse_date, parse_datetime
 
 def load_requests(path: Union[str, Path]) -> Dict[str, Request]:
     path = Path(path)
@@ -228,3 +228,96 @@ def load_payment_options(path: Union[str, Path]) -> Dict[str, PaymentOption]:
     return options
 
 
+def load_messages(path: Union[str, Path]) -> Dict[str, Message]:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    messages: Dict[str, Message] = {}
+    
+    with open(path, mode='r', encoding='utf-8', newline='') as f:
+        reader = csv.DictReader(f)
+        
+        required_columns = {
+            'message_id', 'user_id', 'request_id', 'related_event_id', 'sent_at',
+            'source_type', 'message_text'
+        }
+        
+        if not required_columns.issubset(set(reader.fieldnames or [])):
+            missing = required_columns - set(reader.fieldnames or [])
+            raise ValueError(f"Missing required columns: {missing}")
+
+        for row in reader:
+            mid = row.get('message_id')
+            if not mid or mid.strip() == "":
+                raise ValueError("Missing or blank message_id")
+            
+            if mid in messages:
+                raise ValueError(f"Duplicate message_id found: {mid}")
+            
+            try:
+                messages[mid] = Message(
+                    message_id=mid,
+                    user_id=row['user_id'],
+                    request_id=row.get('request_id') if row.get('request_id') and row['request_id'].strip() else None,
+                    related_event_id=row.get('related_event_id') if row.get('related_event_id') and row['related_event_id'].strip() else None,
+                    sent_at=parse_datetime(row['sent_at']),
+                    source_type=row['source_type'],
+                    message_text=row['message_text']
+                )
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"Error parsing message {mid}: {e}")
+    
+    return messages
+
+
+def load_images(
+    path: Union[str, Path],
+    media_root: Optional[Union[str, Path]] = None,
+) -> Dict[str, ImageRecord]:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    images: Dict[str, ImageRecord] = {}
+    media_directory = Path(media_root) if media_root is not None else None
+    required_columns = {'image_id', 'user_id', 'request_id', 'related_event_id'}
+
+    with open(path, mode='r', encoding='utf-8', newline='') as f:
+        reader = csv.DictReader(f)
+        available_columns = set(reader.fieldnames or [])
+        if not required_columns.issubset(available_columns):
+            missing = required_columns - available_columns
+            raise ValueError(f"Missing required columns: {missing}")
+
+        for row in reader:
+            image_id = row.get('image_id')
+            if not image_id or not image_id.strip():
+                raise ValueError("Missing or blank image_id")
+            if image_id in images:
+                raise ValueError(f"Duplicate image_id found: {image_id}")
+
+            media_reference = f"{image_id}.png"
+            resolved_media_path = None
+            if media_directory is not None:
+                resolved_media_path = media_directory / media_reference
+                if not resolved_media_path.is_file():
+                    raise FileNotFoundError(
+                        f"Missing media file for image {image_id}: "
+                        f"{resolved_media_path}"
+                    )
+
+            images[image_id] = ImageRecord(
+                image_id=image_id,
+                user_id=row['user_id'],
+                request_id=row['request_id'] if row['request_id'].strip() else None,
+                related_event_id=(
+                    row['related_event_id']
+                    if row['related_event_id'].strip()
+                    else None
+                ),
+                media_reference=media_reference,
+                media_path=resolved_media_path,
+            )
+
+    return images

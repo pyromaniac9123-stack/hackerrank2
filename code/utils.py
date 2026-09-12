@@ -17,3 +17,13 @@ def parse_date(value: str | None) -> date | None:
         return date.fromisoformat(value.strip())
     except ValueError:
         raise ValueError(f"Invalid date value: {value}")
+
+def parse_datetime(value: str | None):
+    if value is None or value.strip() == "":
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(value.strip())
+    except ValueError:
+        raise ValueError(f"Invalid datetime value: {value}")
+
